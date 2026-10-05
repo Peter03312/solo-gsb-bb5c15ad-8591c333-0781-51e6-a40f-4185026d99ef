@@ -1,0 +1,29 @@
+services:
+  liftover-web:
+    # 构建上下文取 Compose 项目目录，两种启动入口都能构建出同一镜像：
+    # - 在外层目录以 `--project-directory . -f liftover-web/docker-compose.yml`
+    #   启动时，上下文为外层目录，使用外层目录的 Dockerfile
+    #   （COPY 源路径带 liftover-web/ 前缀）；
+    # - 进入 liftover-web/ 后直接 `docker compose up` 时，上下文为本目录，
+    #   使用本目录的 Dockerfile（COPY app/ static/ ...）。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: liftover-web:1.0.0
+    container_name: liftover-web
+    # 宿主机端口可用环境变量 LIFTOVER_PORT 覆盖，默认 8080
+    ports:
+      - "${LIFTOVER_PORT:-8080}:8080"
+    environment:
+      # 单文件上传上限（MB）
+      LIFTOVER_MAX_UPLOAD_MB: "${LIFTOVER_MAX_UPLOAD_MB:-50}"
+      # 转换结果在内存中的保留时长（秒）
+      LIFTOVER_JOB_TTL_SECONDS: "${LIFTOVER_JOB_TTL_SECONDS:-3600}"
+      # 内存中同时保留的结果任务上限
+      LIFTOVER_MAX_JOBS: "${LIFTOVER_MAX_JOBS:-100}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

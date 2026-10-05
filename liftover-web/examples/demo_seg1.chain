@@ -1,0 +1,22 @@
+# 双段示例 · chain 文件 1（第一段）：chr1(target) -> chrA/chrB/chrM(query)
+# 与 demo_seg2.chain、example_double.bed 配套使用（side1=target, side2=target）。
+#
+# chain 1: chr1 -> chrA，正链，2 个对齐块（中间留缺口演示第一段缺口）
+#   target 块: [0,120) [150,200)   query 块: [0,120) [150,200)
+chain 1000 chr1 2000 + 0 200 chrA 500 + 0 200 1
+120	30	30
+50
+
+# chain 2: chr1 -> chrB，query 为负链（chrB 长 400）
+#   target [300,400) <-> query 存储帧 [0,100)，正向帧 [300,400)，块内反向映射
+chain 2000 chr1 2000 + 300 400 chrB 400 - 0 100 2
+100
+
+# chain 3: chr1 -> chrM；chrM 在 chain 文件 2 中不存在，演示第二段无匹配源染色体
+chain 3000 chr1 2000 + 500 600 chrM 500 + 0 100 3
+100
+
+# chain 4: chr1 -> chrB [100,200)；该区域在 chain 文件 2 中无对齐，
+#   演示第二段“落在对齐范围之外”
+chain 4000 chr1 2000 + 700 800 chrB 400 + 100 200 4
+100

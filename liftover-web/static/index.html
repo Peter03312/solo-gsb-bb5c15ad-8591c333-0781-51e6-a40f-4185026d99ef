@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>离线基因组区间迁移 · BED Liftover</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🧬</text></svg>">
+</head>
+<body>
+<header>
+  <h1>离线基因组区间迁移</h1>
+  <p class="sub">上传 BED 与 UCSC chain 文件，在浏览器中预览每条源区间的转换状态后下载结果。支持单段（一份 chain）与双段（两份 chain 依次迁移）。全程离线，数据不离开本机服务。</p>
+</header>
+
+<main>
+  <section class="card">
+    <form id="lift-form">
+      <div class="form-row side-row">
+        <span class="file-title">转换模式</span>
+        <label class="radio">
+          <input type="radio" name="mode" value="single" checked> 单段（一份 chain）
+        </label>
+        <label class="radio">
+          <input type="radio" name="mode" value="double"> 双段（同一 BED 依次经过两份 chain）
+        </label>
+      </div>
+
+      <div class="form-row">
+        <label class="file-box">
+          <span class="file-title">BED 文件（零基左闭右开）</span>
+          <input type="file" id="bed" name="bed" accept=".bed,.txt,.tsv,text/plain">
+          <span class="file-hint" id="bed-hint">未选择文件</span>
+        </label>
+      </div>
+
+      <div id="single-fields">
+        <div class="form-row">
+          <label class="file-box">
+            <span class="file-title">UCSC chain 文件</span>
+            <input type="file" id="chain" name="chain" accept=".chain,.txt,text/plain">
+            <span class="file-hint" id="chain-hint">未选择文件</span>
+          </label>
+        </div>
+
+        <div class="form-row side-row">
+          <span class="file-title">BED 区间属于 chain 的哪一侧？</span>
+          <label class="radio">
+            <input type="radio" name="side" value="target" checked> target 侧（target → query）
+          </label>
+          <label class="radio">
+            <input type="radio" name="side" value="query"> query 侧（query → target）
+          </label>
+        </div>
+      </div>
+
+      <div id="double-fields" class="hidden">
+        <div class="form-row">
+          <label class="file-box">
+            <span class="file-title">chain 文件 1（第一段）</span>
+            <input type="file" id="chain1" name="chain1" accept=".chain,.txt,text/plain">
+            <span class="file-hint" id="chain1-hint">未选择文件</span>
+          </label>
+          <label class="file-box">
+            <span class="file-title">chain 文件 2（第二段）</span>
+            <input type="file" id="chain2" name="chain2" accept=".chain,.txt,text/plain">
+            <span class="file-hint" id="chain2-hint">未选择文件</span>
+          </label>
+        </div>
+
+        <div class="form-row side-row">
+          <span class="file-title">第一段：BED 区间属于 chain 文件 1 的哪一侧？</span>
+          <label class="radio">
+            <input type="radio" name="side1" value="target" checked> target 侧
+          </label>
+          <label class="radio">
+            <input type="radio" name="side1" value="query"> query 侧
+          </label>
+        </div>
+        <div class="form-row side-row">
+          <span class="file-title">第二段：第一段产物属于 chain 文件 2 的哪一侧？</span>
+          <label class="radio">
+            <input type="radio" name="side2" value="target" checked> target 侧
+          </label>
+          <label class="radio">
+            <input type="radio" name="side2" value="query"> query 侧
+          </label>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <button type="submit" id="submit-btn">校验并转换</button>
+        <span class="limit-hint">单文件上限由 LIFTOVER_MAX_UPLOAD_MB 控制（默认 50 MB）</span>
+      </div>
+    </form>
+  </section>
+
+  <section id="error-box" class="card error-card hidden">
+    <h2>输入错误（已阻止导出）</h2>
+    <p>以下问题必须先修正。本次转换<strong>不会</strong>产生任何可下载文件。</p>
+    <ul id="error-list"></ul>
+  </section>
+
+  <section id="result-box" class="card hidden">
+    <div class="result-head">
+      <h2>转换预览</h2>
+      <div class="btn-row">
+        <button id="download-btn" type="button">下载原始结果 TSV</button>
+        <button id="download-adj-btn" class="secondary" type="button">下载裁决版 TSV</button>
+      </div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <p class="decision-note" id="decision-note"></p>
+
+    <div class="filters" id="filters">
+      <span>筛选：</span>
+      <button data-f="all" class="filter active">全部</button>
+      <button data-f="mapped" class="filter f-mapped">完全映射</button>
+      <button data-f="partial" class="filter f-partial">部分映射</button>
+      <button data-f="ambiguous" class="filter f-ambiguous">歧义</button>
+      <button data-f="unmapped" class="filter f-unmapped">无映射</button>
+    </div>
+
+    <p class="preview-note" id="preview-note"></p>
+    <p class="action-msg" id="action-msg" role="status"></p>
+
+    <div class="table-wrap">
+      <table id="result-table">
+        <thead>
+          <tr>
+            <th>源行号</th>
+            <th>源区间</th>
+            <th>状态</th>
+            <th>候选 / 片段（目标染色体 · 方向 · 目标区间）</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody id="result-tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="filter-panel" class="filter-panel hidden">
+      <h3>质量筛选（双段结果）</h3>
+      <p class="filter-desc">
+        按每条路径的最终覆盖率（seg2_covered / total_len）筛选：输入最小覆盖率（0~1）
+        并勾选要保留的状态。歧义行按路径分别判断，通过阈值的路径全部保留，不自动裁决；
+        无映射行始终计入统计，但不写入筛选结果。筛选不影响原始结果与裁决状态。
+      </p>
+      <div class="form-row filter-controls">
+        <label class="filter-cov">
+          最小最终覆盖率（0~1）
+          <input type="number" id="min-cov" min="0" max="1" step="0.01" value="0.8">
+        </label>
+        <span class="filter-statuses">
+          保留状态：
+          <label class="radio"><input type="checkbox" class="keep-status" value="mapped" checked> 完全映射</label>
+          <label class="radio"><input type="checkbox" class="keep-status" value="partial" checked> 部分映射</label>
+          <label class="radio"><input type="checkbox" class="keep-status" value="ambiguous" checked> 歧义</label>
+          <label class="radio"><input type="checkbox" class="keep-status" value="unmapped"> 无映射（仅计入统计）</label>
+        </span>
+        <button type="button" id="filter-btn">应用筛选</button>
+      </div>
+      <p class="action-msg" id="filter-msg" role="status"></p>
+
+      <div id="filter-result" class="hidden">
+        <div class="result-head">
+          <h4>筛选结果</h4>
+          <button id="filter-download-btn" type="button" class="secondary">下载筛选结果 TSV</button>
+        </div>
+        <div class="stats" id="filter-stats"></div>
+        <p class="preview-note" id="filter-note"></p>
+        <div class="table-wrap">
+          <table id="filter-table">
+            <thead>
+              <tr>
+                <th>源行号</th>
+                <th>源区间</th>
+                <th>状态</th>
+                <th>路径 / 片段（含最终覆盖率）</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="filter-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>坐标约定：输入与输出均为零基、左闭右开；负链转换后的坐标同样满足 start &lt; end。</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

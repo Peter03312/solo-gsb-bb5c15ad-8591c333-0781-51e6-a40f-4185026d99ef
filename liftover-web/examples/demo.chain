@@ -1,0 +1,19 @@
+# 示例 chain 文件（用于离线演示，非真实物种数据）
+#
+# chain 1: chr1(target) -> chrA(query)，正链，3 个对齐块
+#   target 块: [0,16) [56,176) [179,449)
+#   query  块: [0,16) [100,220) [223,493)
+# 数据行格式：每行 "<size> [target_gap query_gap]"，最后一行只有 size
+#   16 40 84 -> size=16，其后 target gap=40、query gap=84
+chain 1000 chr1 1000 + 0 449 chrA 500 + 0 493 1
+16	40	84
+120	3	3
+270
+
+# chain 2: chr1(target) -> chrB(query)，query 为负链
+#   target 块 [300,400)；query 存储帧 [0,100)、负链（chrB 长 300），
+#   按 UCSC 语义（size 枢轴）归一化到正向帧 [200,300)，块内反向映射：
+#   target 320 -> query 279，target [320,360) -> query [240,280)
+#   与 chain 1 在 target 300-403 区间重叠，用于演示“歧义”
+chain 2000 chr1 1000 + 300 400 chrB 300 - 0 100 2
+100

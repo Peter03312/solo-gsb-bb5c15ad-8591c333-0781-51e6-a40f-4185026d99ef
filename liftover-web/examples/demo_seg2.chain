@@ -1,0 +1,18 @@
+# 双段示例 · chain 文件 2（第二段）：chrA/chrB(target) -> chrZ/chrW/chrV(query)
+# 与 demo_seg1.chain、example_double.bed 配套使用（side1=target, side2=target）。
+#
+# chain 10: chrA -> chrZ，正链，2 个对齐块（缺口 [100,120) 演示第二段缺口）
+#   target 块: [0,100) [120,200)   query 块: [0,100) [120,200)
+chain 500 chrA 500 + 0 200 chrZ 1000 + 0 200 10
+100	20	20
+80
+
+# chain 11: chrB [300,400) -> chrW，query 为负链（chrW 长 800）
+#   query 存储帧 [700,800)，正向帧 [0,100)，块内反向映射
+chain 600 chrB 400 + 300 400 chrW 800 - 700 800 11
+100
+
+# chain 12: chrB [300,400) -> chrV，与 chain 11 覆盖同一中间区域，
+#   演示“多条可达路径全部保留为歧义”
+chain 700 chrB 400 + 300 400 chrV 900 + 50 150 12
+100
