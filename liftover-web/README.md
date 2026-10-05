@@ -29,11 +29,12 @@
     │   ├── engine.py         # 单段区间转换引擎（缺口拆分 / 歧义 / 负链）
     │   ├── engine2.py        # 双段串联引擎（路径 / 回溯 / 失败阶段）
     │   ├── filtering.py      # 双段结果质量筛选（最小最终覆盖率 + 保留状态）
+    │   ├── audit.py          # 双段结果源行冲突审计（最终坐标系重叠检测）
     │   ├── report.py         # 单段与双段 TSV 导出、筛选版 TSV、预览 JSON
-    │   └── main.py           # FastAPI 入口（含歧义人工裁决与质量筛选接口）
+    │   └── main.py           # FastAPI 入口（含歧义人工裁决、质量筛选与冲突审计接口）
     ├── static/               # 前端（纯本地资源）
     ├── examples/             # 可直接试用的 BED / chain 示例（含双段示例）
-    ├── tests/                # pytest 测试（105 个用例）
+    ├── tests/                # pytest 测试（134 个用例）
     ├── scripts/init.sh       # 本地开发依赖初始化
     ├── Dockerfile            # 方式 B 构建入口：以本目录为上下文
     ├── docker-compose.yml    # 两种启动方式共用
@@ -209,6 +210,35 @@ bash scripts/init.sh
    原始/裁决版 TSV 的用法完全一致。
 5. 双段结果还可做**质量筛选**（见下一节）：按每条路径的最终覆盖率
    与状态过滤后单独导出 TSV，不影响原始结果与裁决。
+6. 双段结果还可做**源行冲突审计**（见「双段源行冲突审计」一节）：
+   检查不同源行在最终坐标系上是否重叠，页面显示汇总并可下载明细 TSV。
+
+### 双段源行冲突审计
+
+双段转换完成后，预览页底部出现「源行冲突审计」面板（仅双段结果可用）：
+
+1. 选择**审计视图**：
+   - **原始全部路径**（`original`）：所有行的全部路径都参与审计；
+   - **裁决视图**（`adjudicated`）：发起时刻的人工裁决视图——已裁决的
+     歧义行只保留被选路径，**未裁决行仍保留全部路径**；
+2. 点击「发起审计」，页面显示**汇总**（参与源行数 / 组合数、冲突组合
+   对数、冲突区间数、重叠碱基总数）与冲突明细表；
+3. 点击「下载审计明细 TSV」获取全部明细（12 列，UTF-8 带 BOM）。
+
+审计语义：
+
+- 审计单元是（源行 × 路径）组合；**仅比较同一目标染色体上不同源物理
+  行**的零基左闭右开区间，同一源行的多条路径是互斥候选，不互相比较；
+- 每个组合先**合并自身目标片段**（重叠或相接的区间并为一个），再对
+  两个组合求交集，同一碱基不会被重复计数；仅相接（`end == start`）
+  不算重叠；
+- 每条明细列出双方的两段 chain ID、路径序号、交集坐标与重叠碱基数，
+  按（染色体、交集起止、双方源行号与路径序号）稳定排序；
+- 审计结果**固定于发起时的裁决版本**（响应与文件名中的 `v<版本>`），
+  之后的裁决不改写已生成的审计产物，原始下载字节也始终不变；
+- 无冲突时输出空明细与零汇总（不是错误）；任务过期（404）或非双段
+  任务（400）会明确报错；大文件按染色体分组 + 扫描线求交，不做全量
+  两两比较。
 
 ### 双段结果质量筛选
 
@@ -322,6 +352,23 @@ seg1_covered, seg2_covered, total_len, uncovered_src, reason
 `final_coverage`（该路径 `seg2_covered/total_len`，即筛选时使用的最终
 覆盖率，如 `1`、`0.833333`），只包含通过筛选的行与路径；unmapped 行
 不写入。
+
+**双段审计明细**（`POST /api/result/{token}/audit` 后
+`GET /api/download/audit/{audit_token}`）列：
+
+```
+chrom, overlap_start, overlap_end, overlap_bases,
+a_source_line, a_path_index, a_chain1_id, a_chain2_id,
+b_source_line, b_path_index, b_chain1_id, b_chain2_id
+```
+
+- 每行是一段冲突交集：`chrom:[overlap_start, overlap_end)` 为最终坐标系
+  上的零基左闭右开交集区间，`overlap_bases` 为重叠碱基数；
+- `a_*` / `b_*` 是冲突双方（按源行号、路径序号键序排列）的 BED 物理
+  行号、1 基路径序号与两段 chain ID；
+- 无冲突时只有表头；文件名形如
+  `liftover_double_target-target_<时间戳>.audit-original.v0.tsv` 或
+  `…​.audit-adjudicated.v<裁决版本>.tsv`，内容固定于发起时的裁决版本。
 
 ### 失败即阻止导出
 
@@ -605,6 +652,76 @@ curl -OJ "http://localhost:8080/api/download/filtered/${FILTER_TOKEN}"
 | 请求体不是 JSON 对象 | 400 | |
 | filter_token 不存在 / 筛选结果已过期 | 404 | 需重新提交筛选 |
 
+### 双段源行冲突审计
+
+`POST /api/result/{download_token}/audit`，`application/json`，仅适用于
+双段转换结果（`POST /api/liftover2` 返回的 token）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `view` | 字符串，可省略 | `original`（默认，原始全部路径）或 `adjudicated`（发起时的裁决视图：已裁决的歧义行只保留被选路径，未裁决行仍保留全部路径） |
+
+```bash
+# 原始全部路径视图（view 可省略，默认 original）
+curl -s -X POST "http://localhost:8080/api/result/${TOKEN}/audit" \
+  -H 'Content-Type: application/json' -d '{}'
+
+# 裁决视图：按发起时刻的裁决状态收窄已裁决的歧义行
+curl -s -X POST "http://localhost:8080/api/result/${TOKEN}/audit" \
+  -H 'Content-Type: application/json' -d '{"view":"adjudicated"}'
+```
+
+成功（200）返回汇总、冲突明细与审计下载令牌：
+
+```json
+{
+  "download_token": "……",
+  "audit_token": "……",
+  "download_name": "liftover_double_target-target_20261005-120000.audit-original.v0.tsv",
+  "download_url": "/api/download/audit/……",
+  "view": "original",
+  "decision_version": 0,
+  "summary": {
+    "source_rows": 3, "units": 3,
+    "conflict_pairs": 1, "conflict_regions": 1, "conflict_bases": 50
+  },
+  "conflicts": [
+    {"chrom": "chrZ", "start": 50, "end": 100, "bases": 50,
+     "a_source_line": 1, "a_path_index": 1, "a_chain1_id": "1", "a_chain2_id": "10",
+     "b_source_line": 2, "b_path_index": 1, "b_chain1_id": "1", "b_chain2_id": "10"}
+  ]
+}
+```
+
+- `summary`：`source_rows`/`units` 为参与审计的源行数与（源行 × 路径）
+  组合数；`conflict_pairs`/`conflict_regions`/`conflict_bases` 为冲突
+  组合对数、交集区间条数与重叠碱基总数（无冲突时全为 0，`conflicts`
+  为空数组）；
+- `conflicts` 按（染色体、交集起止、双方源行号与路径序号）稳定排序，
+  每条列出双方的两段 chain ID、交集坐标与重叠碱基数；
+- `decision_version` 是发起时的裁决版本：审计产物固定于该版本，之后
+  的裁决不改写已生成的审计，原始下载字节也不变；
+- 只比较同一目标染色体上不同源物理行的区间；每个组合先合并自身目标
+  片段再求交，同一碱基不重复计数；大文件按染色体分组 + 扫描线求交，
+  不做全量两两比较。
+
+下载审计明细 TSV（12 列，UTF-8 带 BOM）：
+
+```bash
+AUDIT_TOKEN=<上一步返回的 audit_token>
+curl -OJ "http://localhost:8080/api/download/audit/${AUDIT_TOKEN}"
+```
+
+明确拒绝的情形（均不改变原任务）：
+
+| 场景 | 状态码 | 说明 |
+| --- | --- | --- |
+| token 不存在 / 结果已过期 | 404 | 需重新提交转换 |
+| 该 token 是单段转换结果 | 400 | 冲突审计仅适用于双段结果 |
+| `view` 非法（非 `original`/`adjudicated`、类型错误） | 400 | 错误信息列出允许值 |
+| 请求体不是 JSON 对象 | 400 | |
+| audit_token 不存在 / 审计结果已过期 | 404 | 需重新发起审计 |
+
 ---
 
 ## 五、快速试用
@@ -659,6 +776,12 @@ FILTER_TOKEN=$(curl -s -X POST "http://localhost:8080/api/result/${TOKEN}/filter
   -d '{"min_coverage":0.9,"keep_statuses":["mapped","partial","ambiguous"]}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['filter_token'])")
 curl -OJ "http://localhost:8080/api/download/filtered/${FILTER_TOKEN}"
+
+# 源行冲突审计：裁决视图（已裁决行收窄为被选路径），下载审计明细 TSV
+AUDIT_TOKEN=$(curl -s -X POST "http://localhost:8080/api/result/${TOKEN}/audit" \
+  -H 'Content-Type: application/json' -d '{"view":"adjudicated"}' \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['audit_token'])")
+curl -OJ "http://localhost:8080/api/download/audit/${AUDIT_TOKEN}"
 ```
 
 该示例 8 行数据覆盖：完全映射（行 3）、第二段缺口导致的部分映射

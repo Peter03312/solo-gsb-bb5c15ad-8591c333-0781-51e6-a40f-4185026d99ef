@@ -46,6 +46,14 @@ const filterStats = document.getElementById("filter-stats");
 const filterNote = document.getElementById("filter-note");
 const filterTbody = document.getElementById("filter-tbody");
 const filterDownloadBtn = document.getElementById("filter-download-btn");
+const auditPanel = document.getElementById("audit-panel");
+const auditBtn = document.getElementById("audit-btn");
+const auditMsg = document.getElementById("audit-msg");
+const auditResult = document.getElementById("audit-result");
+const auditStats = document.getElementById("audit-stats");
+const auditNote = document.getElementById("audit-note");
+const auditTbody = document.getElementById("audit-tbody");
+const auditDownloadBtn = document.getElementById("audit-download-btn");
 
 let currentToken = null;
 let currentName = null;
@@ -59,6 +67,9 @@ let decisionPending = false;
 // 最近一次质量筛选的下载地址（筛选产物独立于原任务）
 let filterDownloadUrl = null;
 let filterDownloadName = null;
+// 最近一次冲突审计的下载地址（审计产物固定于发起时的裁决版本）
+let auditDownloadUrl = null;
+let auditDownloadName = null;
 
 function bindHint(input, hintEl) {
   input.addEventListener("change", () => {
@@ -545,6 +556,11 @@ function resetFilterPanel() {
   filterDownloadUrl = null;
   filterDownloadName = null;
   setFilterMsg("");
+  auditPanel.classList.toggle("hidden", currentKind !== "double");
+  auditResult.classList.add("hidden");
+  auditDownloadUrl = null;
+  auditDownloadName = null;
+  setAuditMsg("");
 }
 
 function setFilterMsg(text, kind) {
@@ -678,4 +694,129 @@ function renderFilteredDest(row, tdDest) {
     });
     tdDest.appendChild(div);
   });
+}
+
+// ---------------------------------------------------------------------------
+// 双段结果源行冲突审计（最终坐标系重叠检测）
+// ---------------------------------------------------------------------------
+
+function setAuditMsg(text, kind) {
+  auditMsg.textContent = text || "";
+  auditMsg.className = `action-msg${kind ? " " + kind : ""}`;
+}
+
+function currentAuditView() {
+  const checked = document.querySelector('input[name="audit-view"]:checked');
+  return checked ? checked.value : "original";
+}
+
+auditBtn.addEventListener("click", async () => {
+  if (!currentToken) return;
+  auditBtn.disabled = true;
+  setAuditMsg("正在审计…", "muted");
+  try {
+    const resp = await fetch(
+      `/api/result/${encodeURIComponent(currentToken)}/audit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ view: currentAuditView() }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      setAuditMsg(
+        (data.errors && data.errors.join("；")) || `审计失败（HTTP ${resp.status}）`,
+        "error",
+      );
+      return;
+    }
+    auditDownloadUrl = data.download_url;
+    auditDownloadName = data.download_name;
+    renderAuditResult(data);
+    const s = data.summary;
+    setAuditMsg(
+      s.conflict_regions === 0
+        ? "审计完成：未发现源行冲突（明细为空，汇总为零）。"
+        : `审计完成：${s.conflict_pairs} 对组合冲突，共 ${s.conflict_regions} 段交集、` +
+          `${s.conflict_bases} bp 重叠。`,
+      "ok",
+    );
+  } catch (err) {
+    setAuditMsg(`网络或服务错误：${err && err.message ? err.message : err}`, "error");
+  } finally {
+    auditBtn.disabled = false;
+  }
+});
+
+auditDownloadBtn.addEventListener("click", () => {
+  if (!auditDownloadUrl) return;
+  triggerDownload(auditDownloadUrl, auditDownloadName || "");
+});
+
+function renderAuditResult(data) {
+  const s = data.summary;
+  auditStats.innerHTML = "";
+  const items = [
+    ["冲突组合对", s.conflict_pairs, s.conflict_pairs ? "ambiguous" : ""],
+    ["冲突区间", s.conflict_regions, s.conflict_regions ? "partial" : ""],
+    ["重叠碱基 (bp)", s.conflict_bases, ""],
+    ["参与源行", s.source_rows, ""],
+    ["参与组合", s.units, ""],
+  ];
+  for (const [label, n, cls] of items) {
+    const div = document.createElement("div");
+    div.className = `stat${cls ? " " + cls : ""}`;
+    div.innerHTML = `<b>${n}</b>${label}`;
+    auditStats.appendChild(div);
+  }
+
+  const viewText = data.view === "adjudicated"
+    ? `裁决视图（固定于发起时的结果版本 v${data.decision_version}）`
+    : "原始全部路径";
+  auditNote.textContent =
+    `审计视图：${viewText}；共 ${s.conflict_regions} 条冲突明细。` +
+    (s.conflict_regions === 0
+      ? "无冲突：明细为空，下载的 TSV 仅含表头。"
+      : "明细按染色体、交集起止与双方源行号/路径序号排序。") +
+    (data.conflicts.length > PREVIEW_LIMIT
+      ? `预览仅显示前 ${PREVIEW_LIMIT} 条，下载的 TSV 包含全部明细。`
+      : "");
+  renderAuditRows(data.conflicts);
+  auditResult.classList.remove("hidden");
+}
+
+function renderAuditRows(conflicts) {
+  auditTbody.innerHTML = "";
+  const shown = conflicts.slice(0, PREVIEW_LIMIT);
+  for (const c of shown) {
+    const tr = document.createElement("tr");
+
+    const tdChrom = document.createElement("td");
+    tdChrom.className = "mono";
+    tdChrom.textContent = c.chrom;
+
+    const tdIv = document.createElement("td");
+    tdIv.className = "mono";
+    tdIv.textContent = `[${c.start},${c.end})`;
+
+    const tdBases = document.createElement("td");
+    tdBases.className = "mono";
+    tdBases.textContent = c.bases;
+
+    const tdA = document.createElement("td");
+    tdA.className = "mono";
+    tdA.textContent =
+      `行 ${c.a_source_line} · 路径 ${c.a_path_index}` +
+      `（chain1 #${c.a_chain1_id} × chain2 #${c.a_chain2_id}）`;
+
+    const tdB = document.createElement("td");
+    tdB.className = "mono";
+    tdB.textContent =
+      `行 ${c.b_source_line} · 路径 ${c.b_path_index}` +
+      `（chain1 #${c.b_chain1_id} × chain2 #${c.b_chain2_id}）`;
+
+    tr.append(tdChrom, tdIv, tdBases, tdA, tdB);
+    auditTbody.appendChild(tr);
+  }
 }

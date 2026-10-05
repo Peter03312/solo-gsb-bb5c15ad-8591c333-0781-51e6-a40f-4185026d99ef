@@ -19,6 +19,12 @@
 状态筛选，产物挂在独立的 filter token 下
 （``GET /api/download/filtered/{filter_token}``），原任务的字节内容、
 裁决状态与版本号在筛选前后完全不变。
+
+双段结果的源行冲突审计（``POST /api/result/{token}/audit``）审计不同
+BED 源物理行在最终坐标系上的区间冲突：可选原始全部路径或发起时的
+裁决视图（仅收窄已裁决的歧义行），产物挂在独立的 audit token 下
+（``GET /api/download/audit/{audit_token}``），固定于发起时的裁决版本，
+后续裁决不改写已生成的审计结果。
 """
 
 from __future__ import annotations
@@ -34,6 +40,15 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .audit import (
+    AUDIT_VIEWS,
+    VIEW_ORIGINAL,
+    build_audit_tsv,
+    build_audit_units,
+    conflict_to_dict,
+    find_conflicts,
+    summarize,
+)
 from .bed import parse_bed
 from .chain import parse_chain
 from .engine import RowResult
@@ -56,7 +71,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("LIFTOVER_MAX_UPLOAD_MB", "50")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.getenv("LIFTOVER_JOB_TTL_SECONDS", "3600"))
 MAX_JOBS = int(os.getenv("LIFTOVER_MAX_JOBS", "100"))
 
-app = FastAPI(title="离线基因组区间迁移 (BED liftover)", version="1.3.0")
+app = FastAPI(title="离线基因组区间迁移 (BED liftover)", version="1.4.0")
 
 
 @dataclass
@@ -82,8 +97,19 @@ class _FilterJob:
     parent_token: str            # 来源任务 token（仅溯源用）
 
 
+@dataclass
+class _AuditJob:
+    """一次源行冲突审计的产物（固定于发起时的裁决版本，之后不再改变）。"""
+
+    tsv_bytes: bytes             # 审计明细 TSV（生成后不变）
+    filename: str
+    created_at: float
+    parent_token: str            # 来源任务 token（仅溯源用）
+
+
 _jobs: dict[str, _Job] = {}
 _filter_jobs: dict[str, _FilterJob] = {}
+_audit_jobs: dict[str, _AuditJob] = {}
 
 
 def _prune_jobs() -> None:
@@ -103,6 +129,14 @@ def _prune_jobs() -> None:
         for k in sorted(_filter_jobs,
                         key=lambda x: _filter_jobs[x].created_at)[: len(_filter_jobs) - MAX_JOBS]:
             _filter_jobs.pop(k, None)
+    expired_a = [k for k, j in _audit_jobs.items()
+                 if now - j.created_at > JOB_TTL_SECONDS]
+    for k in expired_a:
+        _audit_jobs.pop(k, None)
+    if len(_audit_jobs) > MAX_JOBS:
+        for k in sorted(_audit_jobs,
+                        key=lambda x: _audit_jobs[x].created_at)[: len(_audit_jobs) - MAX_JOBS]:
+            _audit_jobs.pop(k, None)
 
 
 def _read_upload(f: UploadFile) -> str:
@@ -564,6 +598,108 @@ async def download_filtered(filter_token: str) -> Response:
         content=fjob.tsv_bytes,
         media_type="text/tab-separated-values; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fjob.filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 双段结果源行冲突审计（最终坐标系重叠检测）
+# ---------------------------------------------------------------------------
+
+def _require_audit_view(body: dict) -> str:
+    val = body.get("view", VIEW_ORIGINAL)
+    if not isinstance(val, str) or val not in AUDIT_VIEWS:
+        allowed = "、".join(AUDIT_VIEWS)
+        raise HTTPException(
+            status_code=400,
+            detail={"errors": [
+                f"view 必须是 {allowed} 之一，收到 {val!r}；"
+                "original 表示原始全部路径，adjudicated 表示发起时的裁决视图"
+            ]},
+        )
+    return val
+
+
+def _audit_name(filename: str, view: str, decision_version: int) -> str:
+    base = filename[:-4] if filename.endswith(".tsv") else filename
+    suffix = f".audit-{view}.v{decision_version}.tsv"
+    return f"{base}{suffix}"
+
+
+@app.post("/api/result/{token}/audit")
+async def audit_result(token: str, request: Request) -> dict:
+    """双段结果源行冲突审计：不同源物理行在最终坐标系上的区间重叠。
+
+    请求体：``{"view": "original" | "adjudicated"}``（``view`` 可省略，
+    默认 ``original`` 即原始全部路径；``adjudicated`` 为发起时的人工
+    裁决视图——已裁决的歧义行只保留被选路径，未裁决行仍保留全部路径）。
+
+    - 只适用于双段转换结果（``POST /api/liftover2`` 产生的 token）；
+      单段结果 → 400，token 不存在/过期 → 404；
+    - 仅比较同一目标染色体上不同源物理行的零基左闭右开区间；每个
+      （源行 × 路径）组合先合并自身目标片段再两两求交，同一碱基不重复
+      计数；同一源行的多条路径互斥，不互相比较；
+    - 审计结果固定于发起时的裁决版本（响应中的 ``decision_version``），
+      之后的裁决改动不影响已生成的审计产物，原始下载字节也始终不变；
+    - 无冲突时 ``conflicts`` 为空、汇总各项为 0（不是错误）；
+    - 明细 TSV 由 ``GET /api/download/audit/{audit_token}`` 下载。
+    """
+    body = await _read_json_body(request)
+    view = _require_audit_view(body)
+
+    job = _get_job_or_404(token)
+    if job.kind != "double":
+        raise HTTPException(
+            status_code=400,
+            detail={"errors": [
+                "源行冲突审计仅适用于双段转换结果（POST /api/liftover2）；"
+                "当前结果是单段转换，请重新提交双段转换后再审计"
+            ]},
+        )
+
+    # 快照发起时的裁决状态与版本：之后的裁决不改写本次审计产物
+    decisions_snapshot = dict(job.decisions)
+    decision_version = job.version
+
+    units = build_audit_units(job.rows, view, decisions_snapshot)
+    conflicts = find_conflicts(units)
+    summary = summarize(units, conflicts)
+
+    tsv = build_audit_tsv(conflicts)
+    payload = b"\xef\xbb\xbf" + tsv.encode("utf-8")
+    audit_token = secrets.token_urlsafe(24)
+    filename = _audit_name(job.filename, view, decision_version)
+    _prune_jobs()
+    _audit_jobs[audit_token] = _AuditJob(
+        tsv_bytes=payload, filename=filename,
+        created_at=time.time(), parent_token=token,
+    )
+
+    return {
+        "download_token": token,
+        "audit_token": audit_token,
+        "download_name": filename,
+        "download_url": f"/api/download/audit/{audit_token}",
+        "view": view,
+        "decision_version": decision_version,
+        "summary": summary,
+        "conflicts": [conflict_to_dict(c) for c in conflicts],
+    }
+
+
+@app.get("/api/download/audit/{audit_token}")
+async def download_audit(audit_token: str) -> Response:
+    """下载源行冲突审计明细 TSV（12 列，固定于发起时的裁决版本）。"""
+    _prune_jobs()
+    ajob = _audit_jobs.get(audit_token)
+    if ajob is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"errors": ["审计结果不存在或已过期，请重新发起审计"]},
+        )
+    return Response(
+        content=ajob.tsv_bytes,
+        media_type="text/tab-separated-values; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{ajob.filename}"'},
     )
 
 
