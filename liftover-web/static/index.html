@@ -187,6 +187,50 @@
         </div>
       </div>
     </div>
+
+    <div id="audit-panel" class="filter-panel hidden">
+      <h3>冲突审计（双段结果）</h3>
+      <p class="filter-desc">
+        审计不同 BED 源行在最终坐标系上的重叠冲突：只比较同一目标染色体上不同源
+        物理行的区间；每个（源行 × 路径）组合先合并自身目标片段，再与另一组合求
+        交集，同一碱基不重复计数。审计结果固定于发起时的裁决版本，之后的裁决不
+        影响已生成的审计明细与下载。
+      </p>
+      <div class="form-row filter-controls">
+        <span class="filter-statuses">
+          审计视图：
+          <label class="radio"><input type="radio" name="audit-view" value="raw" checked> 原始全部路径</label>
+          <label class="radio"><input type="radio" name="audit-view" value="adjudicated"> 裁决视图（已裁决歧义行仅取所选路径，未裁决行保留全部路径）</label>
+        </span>
+        <button type="button" id="audit-btn">发起审计</button>
+      </div>
+      <p class="action-msg" id="audit-msg" role="status"></p>
+
+      <div id="audit-result" class="hidden">
+        <div class="result-head">
+          <h4>审计结果</h4>
+          <button id="audit-download-btn" type="button" class="secondary">下载审计明细 TSV</button>
+        </div>
+        <div class="stats" id="audit-stats"></div>
+        <p class="preview-note" id="audit-note"></p>
+        <div class="table-wrap">
+          <table id="audit-table">
+            <thead>
+              <tr>
+                <th>目标染色体</th>
+                <th>交集区间（零基左闭右开）</th>
+                <th>重叠碱基</th>
+                <th>源行 A · 路径 A</th>
+                <th>chain ID（A）</th>
+                <th>源行 B · 路径 B</th>
+                <th>chain ID（B）</th>
+              </tr>
+            </thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 

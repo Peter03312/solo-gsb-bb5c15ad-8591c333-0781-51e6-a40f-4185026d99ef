@@ -23,6 +23,10 @@ unmapped 行没有候选，相关列写 '.'。
 双段结果的质量筛选版使用 ``build_filtered_tsv2``：在双段 25 列末尾
 追加 ``final_coverage`` 列，且只包含通过筛选的行与路径（unmapped 行
 绝不写入）。
+
+双段结果的冲突审计明细使用 ``build_audit_tsv``：每行是两个
+（源行, 路径）组合在最终坐标系上的一段交集，列定义见文末
+``AUDIT_TSV_HEADER``。
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from typing import Any, Mapping
 
 from .engine import Candidate, Fragment, RowResult
 from .engine2 import PathCandidate, PathFragment, RowResult2, format_uncovered
+from .audit import Conflict
 
 STATUS_LABELS = {
     "mapped": "mapped",
@@ -339,4 +344,48 @@ def build_filtered_tsv2(rows: list[RowResult2]) -> str:
             for fi, frag in enumerate(path.fragments, start=1):
                 values = _path_fragment_values(row, path, frag, fi)
                 writer.writerow(values + [ratio])
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 双段结果的冲突审计明细导出
+#
+# 列（英文表头）::
+#
+#     chrom, overlap_start, overlap_end, overlap_bases,
+#     line_a, path_a, chain1_a, chain2_a,
+#     line_b, path_b, chain1_b, chain2_b
+#
+# 每行是两个（源行, 路径）组合在最终坐标系上的一段交集（零基左闭右开）；
+# 行顺序即 ``audit.find_conflicts`` 的稳定排序结果。无冲突时只有表头。
+# ---------------------------------------------------------------------------
+
+AUDIT_TSV_HEADER = [
+    "chrom",
+    "overlap_start",
+    "overlap_end",
+    "overlap_bases",
+    "line_a",
+    "path_a",
+    "chain1_a",
+    "chain2_a",
+    "line_b",
+    "path_b",
+    "chain1_b",
+    "chain2_b",
+]
+
+
+def build_audit_tsv(conflicts: list[Conflict]) -> str:
+    """冲突审计明细 TSV（无冲突时只含表头）。"""
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf, delimiter="\t", lineterminator="\n",
+                        quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(AUDIT_TSV_HEADER)
+    for c in conflicts:
+        writer.writerow([
+            c.chrom, c.overlap_start, c.overlap_end, c.overlap_bases,
+            c.line_a, c.path_a, c.chain1_a, c.chain2_a,
+            c.line_b, c.path_b, c.chain1_b, c.chain2_b,
+        ])
     return buf.getvalue()
